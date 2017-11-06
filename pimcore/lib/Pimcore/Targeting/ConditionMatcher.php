@@ -18,10 +18,8 @@ declare(strict_types=1);
 namespace Pimcore\Targeting;
 
 use Pimcore\Targeting\Condition\DataProviderDependentConditionInterface;
-use Pimcore\Targeting\ConditionMatcher\Expression\Closure;
-use Pimcore\Targeting\ConditionMatcher\Operator\Boolean;
-use Pimcore\Targeting\ConditionMatcher\RuleBuilder;
 use Pimcore\Targeting\Model\VisitorInfo;
+use Symfony\Component\ExpressionLanguage\ExpressionLanguage;
 
 class ConditionMatcher implements ConditionMatcherInterface
 {
@@ -35,13 +33,19 @@ class ConditionMatcher implements ConditionMatcherInterface
      */
     private $conditionFactory;
 
+    /**
+     * @var ExpressionLanguage
+     */
+    private $expressionLanguage;
+
     public function __construct(
         DataProviderLocatorInterface $dataProviders,
         ConditionFactoryInterface $conditionFactory
     )
     {
-        $this->dataProviders    = $dataProviders;
-        $this->conditionFactory = $conditionFactory;
+        $this->dataProviders      = $dataProviders;
+        $this->conditionFactory   = $conditionFactory;
+        $this->expressionLanguage = new ExpressionLanguage(); // TODO
     }
 
     /**
@@ -49,24 +53,53 @@ class ConditionMatcher implements ConditionMatcherInterface
      */
     public function match(VisitorInfo $visitorInfo, array $conditions): bool
     {
-        $ruleBuilder = new RuleBuilder();
+        $parts  = [];
+
+        $values = [];
+        $valueIndex = 1;
 
         foreach ($conditions as $conditionConfig) {
-            $closure = new Closure(function() use ($visitorInfo, $conditionConfig) {
-                return $this->matchCondition($visitorInfo, $conditionConfig);
-            });
+            if (!empty($parts)) {
+                $parts[] = $this->normalizeOperatorValue($conditionConfig['operator']);
+            }
 
-            $ruleBuilder->add(
-                $closure,
-                Boolean::fromString($conditionConfig['operator']),
-                $conditionConfig['bracketLeft'],
-                $conditionConfig['bracketRight']
-            );
+            if ($conditionConfig['bracketLeft']) {
+                $parts[] = '(';
+            }
+
+            $valueKey          = $conditionConfig['type'] . '_' . $valueIndex++;
+            $values[$valueKey] = $this->matchCondition($visitorInfo, $conditionConfig);
+
+            $parts[] = $valueKey;
+
+            if ($conditionConfig['bracketRight']) {
+                $parts[] = ')';
+            }
         }
 
-        $rule = $ruleBuilder->getResult();
+        $expression = implode(' ', $parts);
+        $result     = $this->expressionLanguage->evaluate($expression, $values);
 
-        return $rule->evaluate();
+        return (bool)$result;
+    }
+
+    private function normalizeOperatorValue(string $operator = null): string
+    {
+        if (empty($operator)) {
+            $operator = '&&';
+        }
+
+        $mapping = [
+            'and'     => '&&',
+            'or'      => '||',
+            'and_not' => '&& not'
+        ];
+
+        if (isset($mapping[$operator])) {
+            $operator = $mapping[$operator];
+        }
+
+        return $operator;
     }
 
     private function matchCondition(VisitorInfo $visitorInfo, array $config): bool
